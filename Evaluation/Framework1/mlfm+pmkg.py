@@ -4,6 +4,11 @@ import torch
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
 
+
+#change the models accordingly
+# 1. ashishkgpian/biobert_icd9_classifier_ehr
+# 2. ashishkgpian/betty_icd9_classifier_ehr_symptoms_text_icd9_150_epochs
+# 3. ashishkgpian/biolink_bert_base_disease_classification
 tokenizer = AutoTokenizer.from_pretrained("ashishkgpian/betty_icd9_classifier_ehr_symptoms_text_icd9_150_epochs")
 model = AutoModelForSequenceClassification.from_pretrained("ashishkgpian/betty_icd9_classifier_ehr_symptoms_text_icd9_150_epochs", ignore_mismatched_sizes=True)
 model.to(device)
