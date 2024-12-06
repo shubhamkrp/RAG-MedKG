@@ -1,12 +1,11 @@
+
+
 import csv
 import json
 import re
 import ahocorasick
 import logging
-import spacy
-from negspacy.negation import Negex
-from negspacy.termsets import termset
-from spacy.language import Language
+import nltk
 from collections import defaultdict
 from tqdm import tqdm  # For progress bars
 
@@ -18,6 +17,13 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger()
+
+nltk.download('punkt')
+
+# Define NegEx parameters
+NEGATION_TERMS = {'no', 'not', 'without', 'deny', 'denies', 'denied', 'never', 'none', 'nor', 'neither', 'cannot', "can't", 'doesn\'t', 'didn\'t', 'won\'t', 'wouldn\'t', 'isn\'t', 'aren\'t'}
+NEGATION_WINDOW = 5  # Number of words before the term to look for negation
+
 
 def load_umls_terms(csv_file):
     """
@@ -52,6 +58,20 @@ def build_automaton(term_to_cuis):
     logger.info("Aho-Corasick automaton built successfully.")
     return A
 
+def is_negated(sentence, term_start, term_end):
+    """
+    Determine if the term is negated within the sentence.
+    Look for negation terms within NEGATION_WINDOW words before the term.
+    """
+    # Extract the substring before the term
+    window_start = max(0, term_start - 100)  # Assume average word length <= 10
+    window_text = sentence[window_start:term_start].lower()
+    words = window_text.split()
+    # Check the last NEGATION_WINDOW words
+    relevant_words = words[-NEGATION_WINDOW:]
+    return any(word in NEGATION_TERMS for word in relevant_words)
+
+
 def is_whole_word(sentence, start, end):
     """
     Check if the matched term is a whole word in the sentence.
@@ -74,38 +94,7 @@ def find_terms(sentence, automaton):
             found.append((term, cuis, start_idx, end_idx + 1))
     return found
 
-def initialize_spacy():
-    """
-    Initialize the spaCy model with Negex.
-    """
-    try:
-        
-        ts = termset("en")
-        if "negex" not in Language.factories:
-            @Language.factory("negex")
-            def negex_component_function(nlp, name):
-                return Negex(nlp, 
-                      name = "negex",
-                      ent_types=["DIS", "SYM"],
-                      neg_termset=ts.get_patterns(),
-                      extension_name = "negex",
-                      chunk_prefix="B",
-                      )
-        nlp = spacy.load("en_core_web_sm")
-        if "negex" not in nlp.pipe_names:
-            nlp.add_pipe("negex", last=True)
-            logger.info("Negex component added to the pipeline.")
-        else:
-            logger.info("Negex component already exists")
-
-
-        logger.info("spaCy model with Negex initialized successfully.")
-        return nlp
-    except Exception as e:
-        logger.error(f"Error initializing spaCy model: {e}")
-        raise
-
-def process_json(json_file, automaton, nlp, disease_term, output_json, output_csv):
+def process_json(json_file, automaton, disease_term, output_json, output_csv):
     """
     Process the JSON file, search for terms and disease, apply NegEx,
     and store the results.
@@ -130,15 +119,9 @@ def process_json(json_file, automaton, nlp, disease_term, output_json, output_cs
             logger.warning(f"Missing 'id' or 'contents' in JSON object: {item}")
             continue
 
-        # Process content with spaCy
-        doc = nlp(content)
+        sentences = nltk.sent_tokenize(content)
 
-        for sent in doc.sents:
-            sentence = sent.text
-            sentence_lower = sentence.lower()
-
-            if disease_term_lower not in sentence_lower:
-                continue  # Skip sentences without the disease term
+        for sentence in sentences:
 
             # Find UMLS terms in the sentence
             term_matches = find_terms(sentence, automaton)
@@ -146,7 +129,7 @@ def process_json(json_file, automaton, nlp, disease_term, output_json, output_cs
                 continue  # No UMLS terms found in the sentence
 
             # Process sentence with spaCy for NegEx
-            sent_doc = nlp(sentence)
+            # sent_doc = nlp(sentence)
 
             # Create a list to store unique terms in the sentence with their CUIs
             unique_terms = defaultdict(set)  # term -> set of cuis
@@ -154,16 +137,10 @@ def process_json(json_file, automaton, nlp, disease_term, output_json, output_cs
 
             for term, cuis, start, end in term_matches:
                 unique_terms[term].update(cuis)
-                # Find the span in sent_doc that matches the term
-                span = sent_doc.char_span(start, end, alignment_mode='expand')
-                if span is None:
-                    # If span is not found, skip negation check
-                    term_negation[term] = False
-                    continue
-                is_neg = span._.negex
-                if is_neg:
-                    term_negation[term] = True
 
+                if term not in term_negation:
+                    negated = is_negated(sentence, start, end)
+                    term_negation[term] = negated
             if not unique_terms:
                 continue  # No valid terms after negation check
 
@@ -221,8 +198,8 @@ def process_json(json_file, automaton, nlp, disease_term, output_json, output_cs
         raise
 
 def main():
-    umls_csv_file = 'umls_terms_T184.csv'
-    output_folder = '/mnt/0C6C8FC06C8FA2D6/sparse_results_3digit'
+    umls_csv_file = 'umls_terms_T184.csv'      
+    output_folder = '/mnt/0C6C8FC06C8FA2D6/sparse_results_cui_new'
 
     logger.info("Script started.")
 
@@ -234,24 +211,20 @@ def main():
     logger.info("Building Aho-Corasick automaton...")
     automaton = build_automaton(term_to_cuis)
 
-    # Initialize spaCy with NegEx
-    logger.info("Initializing spaCy model with NegEx...")
-    nlp = initialize_spacy()
-
-    # Process JSON and search for terms
     import os
-    folder_path = '/mnt/0C6C8FC06C8FA2D6/sparse_retrieval_3digit_ICD'
+    folder_path = '/mnt/0C6C8FC06C8FA2D6/sparse_retrieval'
 
     # Iterate over each file in the folder
     for file_name in os.listdir(folder_path):
         if file_name.endswith('.json'):  # Check if the file is a JSON file
             json_file = os.path.join(folder_path, file_name)
 
+
             logger.info(f"Processing {json_file} JSON file and searching for terms...")
             disease_term = file_name.replace('_', ' ').replace('.json', '')
             output_json = os.path.join(output_folder, f"{file_name.replace('.json', '')}_sentences.json")
             output_csv = os.path.join(output_folder, f"{file_name.replace('.json', '')}_symptom_counts.csv")
-            process_json(json_file, automaton, nlp, disease_term, output_json, output_csv)
+            process_json(json_file, automaton, disease_term, output_json, output_csv)
 
             logger.info(f"{json_file} Processing completed successfully.")
     logger.info("Script completed.")
@@ -259,3 +232,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
